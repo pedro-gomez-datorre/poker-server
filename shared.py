@@ -1,15 +1,14 @@
-import random
 from collections import Counter
-
-ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "Jack", "Queen", "King", "Ace"]
-suits = ["♠", "♥", "♦", "♣"]
+import random
 
 def make_deck():
-    return [rank + suit for rank in ranks for suit in suits]
+    suits = ["♠", "♥", "♦", "♣"]
+    ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
+    return [r + s for s in suits for r in ranks]
 
-def draw_card(deck, n):
-    hand = deck[:n]
-    del deck[:n]
+def draw_card(deck, n=1):
+    drawn = [deck.pop() for _ in range(n)]
+    return drawn if n > 1 else drawn[0]
 
 def hand_rank(cards):
     ranks = [c[:-1] for c in cards]
