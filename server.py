@@ -25,7 +25,8 @@ game_state = {
     "current_bet": 0,
     "turn_index": 0,
     "round_stage": "preflop",  # preflop, flop, turn, river, showdown
-    "game_started": False
+    "game_started": False,
+    "winner": None
 }
 
 lock = threading.Lock()
@@ -39,7 +40,7 @@ def broadcast_state():
             clients.remove(c)
             c.close()
 
-# CALCULATE WINNER AT SHOWDOWN
+# CALCULATE WINNER
 def calculate_winner():
     active_players = [p for p in game_state["players"] if p["active"]]
     if not active_players:
@@ -53,18 +54,22 @@ def calculate_winner():
             winner = p
     return winner
 
-# END ROUND AND PAY POT
+# END ROUND
 def end_round():
     winner = calculate_winner()
     if winner:
         winner["chips"] += game_state["pot"]
         print(f"Winner: {winner['name']} wins {game_state['pot']} chips")
+        game_state["winner"] = winner["name"]
+    else:
+        game_state["winner"] = None
+
     game_state["pot"] = 0
-    # Reset hands for next round
     for p in game_state["players"]:
         p["hand"] = []
         p["active"] = True
         p["current_bet"] = 0
+
     game_state["table"] = []
     game_state["current_bet"] = 0
     game_state["round_stage"] = "preflop"
@@ -190,6 +195,7 @@ def start_game():
         game_state["current_bet"] = 0
         game_state["turn_index"] = 0
         game_state["round_stage"] = "preflop"
+        game_state["winner"] = None
         game_state["game_started"] = True
 
         for player in game_state["players"]:
