@@ -1,222 +1,237 @@
-from shared import make_deck, draw_card, hand_rank
 import socket
 import threading
 import pickle
 import random
 import time
 
-# SERVER SETUP
-HOST = '0.0.0.0'
 PORT = 5555
 
-clients = []
-players_names = []
+def make_deck():
+    suits = ["♠", "♥", "♦", "♣"]
+    ranks = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
+    deck = [r+s for s in suits for r in ranks]
+    random.shuffle(deck)
+    return deck
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.bind((HOST, PORT))
-server.listen()
+RANK_ORDER = {r:i for i,r in enumerate("23456789TJQKA", start=2)}
 
-# GAME STATE
-game_state = {
-    "players": [],
-    "deck": [],
-    "table": [],
-    "pot": 0,
-    "current_bet": 0,
-    "turn_index": 0,
-    "round_stage": "preflop",  # preflop, flop, turn, river, showdown
-    "game_started": False,
-    "winner": None
+def cv(c):
+    r=c[:-1]
+    if r=="10": r="T"
+    return RANK_ORDER[r]
+
+from collections import Counter
+
+def is_straight(v):
+    u=sorted(set(v))
+    if len(u)<5: return False,None
+    if set([14,5,4,3,2]).issubset(v): return True,5
+    for i in range(len(u)-4):
+        w=u[i:i+5]
+        if w==list(range(w[0],w[0]+5)): return True,w[-1]
+    return False,None
+
+def rank5(cards):
+    v=sorted([cv(c) for c in cards],reverse=True)
+    s=[c[-1] for c in cards]
+    f=len(set(s))==1
+    st,hi=is_straight(v)
+    c=Counter(v)
+    g=sorted(c.items(),key=lambda x:(x[1],x[0]),reverse=True)
+    freq=[x[1] for x in g]
+    ordered=[x[0] for x in g for _ in range(x[1])]
+    if st and f:
+        if hi==14: return (9,[14])
+        return (8,[hi])
+    if freq==[4,1]: return (7,ordered)
+    if freq==[3,2]: return (6,ordered)
+    if f: return (5,v)
+    if st: return (4,[hi])
+    if freq==[3,1,1]: return (3,ordered)
+    if freq==[2,2,1]: return (2,ordered)
+    if freq==[2,1,1,1]: return (1,ordered)
+    return (0,v)
+
+def best_rank(cards):
+    best=None
+    n=len(cards)
+    for i in range(n-4):
+        for j in range(i+1,n-3):
+            for k in range(j+1,n-2):
+                for l in range(k+1,n-1):
+                    for m in range(l+1,n):
+                        h=[cards[i],cards[j],cards[k],cards[l],cards[m]]
+                        r=rank5(h)
+                        if best is None or r>best:
+                            best=r
+    return best
+
+clients=[]
+players=[]
+lock=threading.Lock()
+game_state={
+    "players":[],
+    "table":[],
+    "pot":0,
+    "turn_index":0,
+    "game_started":False,
+    "round_stage":"preflop",
+    "winner":None
 }
 
-lock = threading.Lock()
+def broadcast():
+    data=pickle.dumps(game_state)
+    for c in clients:
+        try: c.sendall(data)
+        except: pass
 
-# BROADCAST GAME STATE
-def broadcast_state():
-    for c in clients[:]:
-        try:
-            c.sendall(pickle.dumps(game_state))
-        except:
-            clients.remove(c)
-            c.close()
-
-# CALCULATE WINNER
-def calculate_winner():
-    active_players = [p for p in game_state["players"] if p["active"]]
-    if not active_players:
-        return None
-    best_rank = None
-    winner = None
-    for p in active_players:
-        rank = hand_rank(p["hand"] + game_state["table"])
-        if best_rank is None or rank > best_rank:
-            best_rank = rank
-            winner = p
-    return winner
-
-# END ROUND
-def end_round():
-    winner = calculate_winner()
-    if winner:
-        winner["chips"] += game_state["pot"]
-        print(f"Winner: {winner['name']} wins {game_state['pot']} chips")
-        game_state["winner"] = winner["name"]
-    else:
-        game_state["winner"] = None
-
-    game_state["pot"] = 0
-    for p in game_state["players"]:
-        p["hand"] = []
-        p["active"] = True
-        p["current_bet"] = 0
-
-    game_state["table"] = []
-    game_state["current_bet"] = 0
-    game_state["round_stage"] = "preflop"
-    game_state["turn_index"] = 0
-    broadcast_state()
-
-# PROCESS PLAYER ACTION
-def process_action(action):
-    global game_state
-    with lock:
-        player_name = action["player"]
-        act = action["action"]
-        amt = action.get("amount", 0)
-
-        player = next((p for p in game_state["players"] if p["name"] == player_name), None)
-        if not player or not player["active"]:
-            return
-
-        if act == "fold":
-            player["active"] = False
-        elif act == "call":
-            diff = game_state["current_bet"] - player.get("current_bet", 0)
-            diff = min(diff, player["chips"])
-            player["chips"] -= diff
-            player["current_bet"] = game_state["current_bet"]
-            game_state["pot"] += diff
-        elif act == "raise":
-            game_state["current_bet"] += amt
-            diff = game_state["current_bet"] - player.get("current_bet", 0)
-            diff = min(diff, player["chips"])
-            player["chips"] -= diff
-            player["current_bet"] = game_state["current_bet"]
-            game_state["pot"] += diff
-        elif act == "allin":
-            allin_amt = player["chips"]
-            player["chips"] = 0
-            player["current_bet"] += allin_amt
-            game_state["current_bet"] = max(game_state["current_bet"], player["current_bet"])
-            game_state["pot"] += allin_amt
-
-        # Move to next player
-        alive_players = [p for p in game_state["players"] if p["active"] and p["chips"] > 0]
-        if len(alive_players) <= 1:
-            game_state["turn_index"] = -1
-            end_round()
-        else:
-            while True:
-                game_state["turn_index"] = (game_state["turn_index"] + 1) % len(game_state["players"])
-                next_player = game_state["players"][game_state["turn_index"]]
-                if next_player["active"] and next_player["chips"] > 0:
-                    break
-
-# ADVANCE ROUND (DEAL TABLE CARDS)
-def advance_round():
-    with lock:
-        if game_state["round_stage"] == "preflop":
-            game_state["table"] = draw_card(game_state["deck"], 3)  # flop
-            game_state["round_stage"] = "flop"
-        elif game_state["round_stage"] == "flop":
-            game_state["table"] += draw_card(game_state["deck"], 1)  # turn
-            game_state["round_stage"] = "turn"
-        elif game_state["round_stage"] == "turn":
-            game_state["table"] += draw_card(game_state["deck"], 1)  # river
-            game_state["round_stage"] = "river"
-        elif game_state["round_stage"] == "river":
-            game_state["round_stage"] = "showdown"
-            end_round()
-        broadcast_state()
-
-# HANDLE CLIENT
-def handle_client(conn, addr):
-    print(f"New connection from {addr}")
-    try:
-        name = pickle.loads(conn.recv(1024))
-    except:
-        conn.close()
-        return
-
-    with lock:
-        clients.append(conn)
-        players_names.append(name)
-        game_state["players"].append({
-            "name": name,
-            "chips": 1000,
-            "hand": [],
-            "active": True,
-            "current_bet": 0
-        })
-
-    broadcast_state()
-
+def next_player():
+    n=len(players)
     while True:
-        try:
-            msg = conn.recv(4096)
-            if not msg:
-                break
-            action = pickle.loads(msg)
-            process_action(action)
-            broadcast_state()
-            if all(p["current_bet"] == game_state["current_bet"] or not p["active"] for p in game_state["players"]):
-                for p in game_state["players"]:
-                    p["current_bet"] = 0
-                advance_round()
-        except:
-            with lock:
-                if name in players_names:
-                    idx = players_names.index(name)
-                    del players_names[idx]
-                    del game_state["players"][idx]
-                if conn in clients:
-                    clients.remove(conn)
-            conn.close()
-            broadcast_state()
+        game_state["turn_index"]=(game_state["turn_index"]+1)%n
+        if players[game_state["turn_index"]]["active"]:
             break
 
-# START GAME
-def start_game():
+def all_bets_equal():
+    b=[p["current_bet"] for p in players if p["active"]]
+    return len(set(b))==1
+
+def active_count():
+    return sum(1 for p in players if p["active"])
+
+def reset_bets():
+    for p in players:
+        p["current_bet"]=0
+
+def deal_flop(deck):
+    game_state["table"]+= [deck.pop(),deck.pop(),deck.pop()]
+
+def deal_turn(deck):
+    game_state["table"].append(deck.pop())
+
+def deal_river(deck):
+    game_state["table"].append(deck.pop())
+
+def showdown():
+    best=None
+    win=None
+    for p in players:
+        if p["active"]:
+            cards=p["hand"]+game_state["table"]
+            r=best_rank(cards)
+            p["rank"]=r
+            if best is None or r>best:
+                best=r
+                win=p["name"]
+    game_state["winner"]=win
+    for p in players:
+        if p["name"]==win:
+            p["chips"]+=game_state["pot"]
+    game_state["pot"]=0
+
+def handle_player(conn,addr):
+    name=pickle.loads(conn.recv(4096))
     with lock:
-        game_state["deck"] = make_deck()
-        random.shuffle(game_state["deck"])
-        game_state["table"] = []
-        game_state["pot"] = 0
-        game_state["current_bet"] = 0
-        game_state["turn_index"] = 0
-        game_state["round_stage"] = "preflop"
-        game_state["winner"] = None
-        game_state["game_started"] = True
+        clients.append(conn)
+        players.append({
+            "name":name,
+            "chips":1000,
+            "hand":[],
+            "current_bet":0,
+            "active":True
+        })
+        game_state["players"]=players.copy()
+    broadcast()
 
-        for player in game_state["players"]:
-            player["hand"] = draw_card(game_state["deck"], 2)
-            player["active"] = True
-            player["current_bet"] = 0
-
-    broadcast_state()
-    print("Game started with players:", [p["name"] for p in game_state["players"]])
-
-# SERVER LOOP
-def start_server():
-    print(f"Server running on {HOST}:{PORT}")
     while True:
-        conn, addr = server.accept()
-        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        try:
+            data=conn.recv(4096)
+            if not data: break
+            action=pickle.loads(data)
+            with lock:
+                p=[x for x in players if x["name"]==action["player"]][0]
+                if action["action"]=="fold":
+                    p["active"]=False
+                elif action["action"]=="call":
+                    mb=max(x["current_bet"] for x in players)
+                    diff=mb-p["current_bet"]
+                    if diff>p["chips"]: diff=p["chips"]
+                    p["chips"]-=diff
+                    p["current_bet"]+=diff
+                    game_state["pot"]+=diff
+                elif action["action"]=="raise":
+                    mb=max(x["current_bet"] for x in players)
+                    amt=action["amount"]
+                    total=mb-p["current_bet"]+amt
+                    if total>p["chips"]: total=p["chips"]
+                    p["chips"]-=total
+                    p["current_bet"]+=total
+                    game_state["pot"]+=total
+                elif action["action"]=="allin":
+                    total=p["chips"]
+                    p["chips"]=0
+                    p["current_bet"]+=total
+                    game_state["pot"]+=total
 
-# MAIN LOOP
-if __name__ == "__main__":
-    threading.Thread(target=start_server, daemon=True).start()
+                if active_count()==1:
+                    for x in players:
+                        if x["active"]:
+                            x["chips"]+=game_state["pot"]
+                    game_state["round_stage"]="showdown"
+                    game_state["winner"]=[x["name"] for x in players if x["active"]][0]
+                    game_state["pot"]=0
+                    broadcast()
+                    continue
+
+                if all_bets_equal():
+                    if game_state["round_stage"]=="preflop":
+                        deal_flop(deck)
+                        reset_bets()
+                        game_state["round_stage"]="flop"
+                    elif game_state["round_stage"]=="flop":
+                        deal_turn(deck)
+                        reset_bets()
+                        game_state["round_stage"]="turn"
+                    elif game_state["round_stage"]=="turn":
+                        deal_river(deck)
+                        reset_bets()
+                        game_state["round_stage"]="river"
+                    elif game_state["round_stage"]=="river":
+                        game_state["round_stage"]="showdown"
+                        showdown()
+
+                next_player()
+            broadcast()
+        except:
+            break
+    conn.close()
+
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+s.bind(("",PORT))
+s.listen()
+
+deck=None
+
+def game_loop():
+    global deck
     while True:
-        if len(game_state["players"]) >= 2 and not game_state["game_started"]:
-            start_game()
+        if len(players)>=2 and not game_state["game_started"]:
+            deck=make_deck()
+            for p in players:
+                p["hand"]=[deck.pop(),deck.pop()]
+                p["active"]=True
+                p["current_bet"]=0
+            game_state["table"]=[]
+            game_state["pot"]=0
+            game_state["turn_index"]=0
+            game_state["round_stage"]="preflop"
+            game_state["winner"]=None
+            game_state["game_started"]=True
+            broadcast()
         time.sleep(1)
+
+threading.Thread(target=game_loop,daemon=True).start()
+
+while True:
+    c,a=s.accept()
+    threading.Thread(target=handle_player,args=(c,a),daemon=True).start()
