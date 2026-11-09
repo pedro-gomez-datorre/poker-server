@@ -1,143 +1,112 @@
-import socket, threading, pickle, time
-from poker import make_deck, best
+import socket, threading, json, sys
+from poker import Table
 
-PORT = 5555
+PORT=5555
+DELAY=3
 
-players=[]
-clients=[]
-lock=threading.Lock()
+table=Table()
+clients={}
+lock=threading.RLock()
+next_id=0
+pending=False
 
-state={
-    "players":[],
-    "table":[],
-    "pot":0,
-    "turn_index":0,
-    "round_stage":"waiting",
-    "game_started":False,
-    "winner":None
-}
+def send(conn,msg):
+    try: conn.sendall((json.dumps(msg)+"\n").encode())
+    except OSError: pass
 
-deck=[]
+def view(pid):
+    t=table
+    show=t.phase=="showdown"
+    turn=t.players[t.turn]["id"] if t.turn is not None else None
+    players=[]
+    for p in t.players:
+        if p["gone"]: continue
+        if p["id"]==pid or (show and p["in_round"]): hand=p["hand"]
+        else: hand=["??"]*len(p["hand"])
+        players.append({
+            "id":p["id"],
+            "name":p["name"],
+            "chips":p["chips"],
+            "bet":p["current_bet"],
+            "in_round":p["in_round"],
+            "allin":p["allin"],
+            "hand":hand
+        })
+    return {
+        "type":"state",
+        "you":pid,
+        "phase":t.phase,
+        "table":t.community_cards,
+        "pot":sum(p["total_bet"] for p in t.players),
+        "turn":turn,
+        "button":t.players[t.button]["id"] if 0<=t.button<len(t.players) else None,
+        "players":players,
+        "actions":t.legal_actions() if turn==pid else None,
+        "results":t.results
+    }
 
 def broadcast():
-    for c in clients:
-        try: c.sendall(pickle.dumps(state))
-        except: pass
+    for pid,conn in list(clients.items()): send(conn,view(pid))
 
-def active():
-    return [p for p in players if p["active"]]
-
-def alive():
-    return [p for p in players if p["chips"]>0]
-
-def reset_round():
-    global deck
-    deck=make_deck()
-    state["table"]=[]
-    state["pot"]=0
-    state["round_stage"]="preflop"
-    state["winner"]=None
-    state["turn_index"]=0
-    for p in players:
-        if p["chips"]>0:
-            p["hand"]=[deck.pop(),deck.pop()]
-            p["active"]=True
-            p["current_bet"]=0
-        else:
-            p["active"]=False
+def update():
+    global pending
     broadcast()
+    if table.phase in ("hand_over","showdown") and not pending:
+        pending=True
+        threading.Timer(DELAY,new_hand).start()
 
-def next_turn():
-    n=len(players)
-    while True:
-        state["turn_index"]=(state["turn_index"]+1)%n
-        if players[state["turn_index"]]["active"]: break
-
-def bets_equal():
-    b=[p["current_bet"] for p in active()]
-    return len(set(b))==1
-
-def showdown():
-    best_r=None
-    wins=[]
-    for p in active():
-        r=best(p["hand"]+state["table"])
-        if best_r is None or r>best_r:
-            best_r=r
-            wins=[p]
-        elif r==best_r:
-            wins.append(p)
-    share=state["pot"]//len(wins)
-    for w in wins:
-        w["chips"]+=share
-    state["winner"]=", ".join(w["name"] for w in wins)
-    state["round_stage"]="showdown"
-    broadcast()
-    time.sleep(3)
-    if len(alive())>1:
-        reset_round()
-    else:
-        state["game_started"]=False
-        broadcast()
+def new_hand():
+    global pending
+    with lock:
+        pending=False
+        table.start_hand()
+        update()
 
 def handle(conn):
-    name=pickle.loads(conn.recv(4096))
-    p={"name":name,"chips":500,"hand":[],"current_bet":0,"active":False}
-    with lock:
-        players.append(p)
-        clients.append(conn)
-        state["players"]=players
-        if len(alive())>=2 and not state["game_started"]:
-            state["game_started"]=True
-            reset_round()
-        broadcast()
+    global next_id
+    f=conn.makefile("r",encoding="utf-8")
+    pid=None
+    try:
+        msg=json.loads(f.readline())
+        name=str(msg.get("name","")).strip()[:20]
+        with lock:
+            if not name or any(p["name"]==name and not p["gone"] for p in table.players):
+                send(conn,{"type":"error","msg":"Nombre vacío o ya en uso"})
+                return
+            pid=next_id
+            next_id+=1
+            table.add_player(pid,name)
+            clients[pid]=conn
+            send(conn,{"type":"welcome","id":pid})
+            if table.phase=="waiting" and not pending: table.start_hand()
+            update()
+        for line in f:
+            msg=json.loads(line)
+            with lock:
+                err=table.act(pid,msg.get("action"),msg.get("amount",0))
+                if err: send(conn,{"type":"error","msg":err})
+                else: update()
+    except (OSError,ValueError,AttributeError):
+        pass
+    finally:
+        with lock:
+            if pid is not None:
+                clients.pop(pid,None)
+                table.leave(pid)
+                update()
+        conn.close()
 
+def main():
+    s=socket.socket()
+    s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+    s.bind(("",PORT))
+    s.listen()
+    print("Servidor en el puerto",PORT)
     while True:
-        try:
-            msg=pickle.loads(conn.recv(4096))
-            if not p["active"]: continue
-            act=msg["action"]
-            if act=="fold":
-                p["active"]=False
-            else:
-                need=max(x["current_bet"] for x in players)-p["current_bet"]
-                if act=="call":
-                    pay=min(need,p["chips"])
-                elif act=="raise":
-                    pay=min(need+msg["amount"],p["chips"])
-                else:
-                    pay=p["chips"]
-                p["chips"]-=pay
-                p["current_bet"]+=pay
-                state["pot"]+=pay
-            if len(active())==1:
-                active()[0]["chips"]+=state["pot"]
-                showdown()
-                continue
-            if bets_equal():
-                for x in players: x["current_bet"]=0
-                if state["round_stage"]=="preflop":
-                    state["table"]+=[deck.pop(),deck.pop(),deck.pop()]
-                    state["round_stage"]="flop"
-                elif state["round_stage"]=="flop":
-                    state["table"].append(deck.pop())
-                    state["round_stage"]="turn"
-                elif state["round_stage"]=="turn":
-                    state["table"].append(deck.pop())
-                    state["round_stage"]="river"
-                elif state["round_stage"]=="river":
-                    showdown()
-                    continue
-            next_turn()
-            broadcast()
-        except:
-            break
-    conn.close()
+        c,_=s.accept()
+        threading.Thread(target=handle,args=(c,),daemon=True).start()
 
-s=socket.socket()
-s.bind(("",PORT))
-s.listen()
-
-while True:
-    c,_=s.accept()
-    threading.Thread(target=handle,args=(c,),daemon=True).start()
+if __name__=="__main__":
+    if len(sys.argv)>1: PORT=int(sys.argv[1])
+    if len(sys.argv)>2: DELAY=float(sys.argv[2])
+    main()
