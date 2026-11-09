@@ -2,6 +2,7 @@ import random
 from collections import Counter
 
 R={r:i for i,r in enumerate("23456789TJQKA",start=2)}
+HAND_NAMES=["Carta alta","Pareja","Doble pareja","Trío","Escalera","Color","Full","Póker","Escalera de color","Escalera real"]
 
 def make_deck():
     suits=["♠","♥","♦","♣"]
@@ -75,6 +76,7 @@ class Table:
         self.deck = []
         self.highest_bet = 0
         self.min_raise = big_blind
+        self.results = []
 
     def add_player(self, id_,name):
         self.players.append({
@@ -86,7 +88,8 @@ class Table:
             "total_bet": 0,
             "in_round": False,
             "allin": False,
-            "talked": False
+            "talked": False,
+            "gone": False
         })
 
     def _next_index(self, start, cond):
@@ -116,6 +119,7 @@ class Table:
             return False
 
         self.deck = make_deck()
+        self.results = []
         self.community_cards = []
 
         for p in self.players:
@@ -145,7 +149,8 @@ class Table:
         self.min_raise = self.big_blind
         self.phase = "preflop"
 
-        self.turn = self._next_index(bb, self._can_act)
+        self.turn = self._next_index(bb, self._needs_to_act)
+        if self.turn is None: self._next_street()
         return True
 
     def legal_actions(self):
@@ -204,6 +209,7 @@ class Table:
         if len([p for p in self.players if p["in_round"]])==1:
             self.turn=None
             self.phase="hand_over"
+            self._finish()
             return
         nxt=self._next_index(self.turn,self._needs_to_act)
         if nxt is not None: self.turn=nxt
@@ -228,9 +234,51 @@ class Table:
                 self.phase="river"
             else:
                 self.phase="showdown"
-                self.turn=None
+                self._finish()
                 return
 
             if sum(self._can_act(p) for p in self.players)>=2:
                 self.turn=self._next_index(self.button,self._can_act)
                 return
+
+    def _finish(self):
+        self.turn=None
+        alive=[p for p in self.players if p["in_round"]]
+        ranks={p["id"]:best(p["hand"]+self.community_cards) for p in alive} if len(alive)>1 else {}
+        n=len(self.players)
+        seat=lambda p:(self.players.index(p)-self.button-1)%n
+        self.results=[]
+        prev=0
+        for lv in sorted(set(p["total_bet"] for p in self.players if p["total_bet"]>0)):
+            pot=sum(min(p["total_bet"],lv)-min(p["total_bet"],prev) for p in self.players)
+            prev=lv
+            elig=[p for p in alive if p["total_bet"]>=lv] or alive
+            if ranks:
+                top=max(ranks[p["id"]] for p in elig)
+                win=[p for p in elig if ranks[p["id"]]==top]
+                hand=HAND_NAMES[top[0]]
+            else:
+                win=elig
+                hand=None
+            win.sort(key=seat)
+            share,rest=divmod(pot,len(win))
+            for i,p in enumerate(win): p["chips"]+=share+(1 if i<rest else 0)
+            names=[p["name"] for p in win]
+            if self.results and self.results[-1]["winners"]==names: self.results[-1]["amount"]+=pot
+            else: self.results.append({"winners":names,"amount":pot,"hand":hand})
+        for p in self.players:
+            p["total_bet"]=0
+            p["current_bet"]=0
+
+    def leave(self, player_id):
+        p=next((x for x in self.players if x["id"]==player_id),None)
+        if p is None: return
+        if self.turn is not None and self.players[self.turn] is p:
+            self.act(player_id,"fold")
+        elif self.turn is not None and p["in_round"]:
+            p["in_round"]=False
+            if len([x for x in self.players if x["in_round"]])==1:
+                self.phase="hand_over"
+                self._finish()
+        p["gone"]=True
+        p["chips"]=0
