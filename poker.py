@@ -147,3 +147,90 @@ class Table:
 
         self.turn = self._next_index(bb, self._can_act)
         return True
+
+    def legal_actions(self):
+        if self.turn is None: return None
+        p=self.players[self.turn]
+        need=self.highest_bet-p["current_bet"]
+        top=p["current_bet"]+p["chips"]
+        return {
+            "can_check":need==0,
+            "to_call":min(need,p["chips"]),
+            "can_raise":top>self.highest_bet,
+            "min_raise_to":min(self.highest_bet+self.min_raise,top),
+            "max_raise_to":top
+        }
+
+    def act(self, player_id, action, amount=0):
+        if self.turn is None: return "No es momento de apostar"
+        p=self.players[self.turn]
+        if p["id"]!=player_id: return "No es tu turno"
+        need=self.highest_bet-p["current_bet"]
+        top=p["current_bet"]+p["chips"]
+
+        if action=="fold":
+            p["in_round"]=False
+        elif action=="check":
+            if need>0: return f"No puedes pasar: tienes que poner {need}"
+        elif action=="call":
+            if need==0: return "No hay nada que igualar: usa check"
+            self._put_chips(p,need)
+        elif action in ("raise","allin"):
+            if action=="allin": amount=top
+            if not isinstance(amount,int): return "La cantidad tiene que ser un número entero"
+            if amount>top: return f"No tienes tantas fichas: como mucho {top}"
+            if amount<=self.highest_bet:
+                if action!="allin": return f"Para subir tienes que pasar de {self.highest_bet}"
+                self._put_chips(p,p["chips"])
+            else:
+                r=amount-self.highest_bet
+                if r<self.min_raise and amount<top: return f"La subida mínima es hasta {self.highest_bet+self.min_raise}"
+                self._put_chips(p,amount-p["current_bet"])
+                if r>=self.min_raise: self.min_raise=r
+                self.highest_bet=amount
+                for x in self.players:
+                    if x is not p: x["talked"]=False
+        else:
+            return f"Acción desconocida: {action}"
+
+        p["talked"]=True
+        self._advance()
+        return None
+
+    def _needs_to_act(self, p):
+        return self._can_act(p) and (not p["talked"] or p["current_bet"]<self.highest_bet)
+
+    def _advance(self):
+        if len([p for p in self.players if p["in_round"]])==1:
+            self.turn=None
+            self.phase="hand_over"
+            return
+        nxt=self._next_index(self.turn,self._needs_to_act)
+        if nxt is not None: self.turn=nxt
+        else: self._next_street()
+
+    def _next_street(self):
+        while True:
+            for p in self.players:
+                p["current_bet"]=0
+                p["talked"]=False
+            self.highest_bet=0
+            self.min_raise=self.big_blind
+
+            if self.phase=="preflop":
+                self.community_cards+=[self.deck.pop(),self.deck.pop(),self.deck.pop()]
+                self.phase="flop"
+            elif self.phase=="flop":
+                self.community_cards.append(self.deck.pop())
+                self.phase="turn"
+            elif self.phase=="turn":
+                self.community_cards.append(self.deck.pop())
+                self.phase="river"
+            else:
+                self.phase="showdown"
+                self.turn=None
+                return
+
+            if sum(self._can_act(p) for p in self.players)>=2:
+                self.turn=self._next_index(self.button,self._can_act)
+                return
