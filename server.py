@@ -1,62 +1,7 @@
-import socket, threading, pickle, random, time
-from collections import Counter
+import socket, threading, pickle, time
+from poker import make_deck, best
 
 PORT = 5555
-
-def make_deck():
-    suits=["♠","♥","♦","♣"]
-    ranks=["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
-    d=[r+s for s in suits for r in ranks]
-    random.shuffle(d)
-    return d
-
-R={r:i for i,r in enumerate("23456789TJQKA",start=2)}
-
-def cv(c):
-    r=c[:-1]
-    if r=="10": r="T"
-    return R[r]
-
-def straight(v):
-    u=sorted(set(v))
-    if len(u)<5: return False,None
-    if set([14,5,4,3,2]).issubset(v): return True,5
-    for i in range(len(u)-4):
-        if u[i:i+5]==list(range(u[i],u[i]+5)): return True,u[i+4]
-    return False,None
-
-def rank5(cards):
-    v=sorted([cv(c) for c in cards],reverse=True)
-    s=[c[-1] for c in cards]
-    f=len(set(s))==1
-    st,hi=straight(v)
-    c=Counter(v)
-    g=sorted(c.items(),key=lambda x:(x[1],x[0]),reverse=True)
-    freq=[x[1] for x in g]
-    o=[x[0] for x in g for _ in range(x[1])]
-    if st and f:
-        if hi==14: return (9,[14])
-        return (8,[hi])
-    if freq==[4,1]: return (7,o)
-    if freq==[3,2]: return (6,o)
-    if f: return (5,v)
-    if st: return (4,[hi])
-    if freq==[3,1,1]: return (3,o)
-    if freq==[2,2,1]: return (2,o)
-    if freq==[2,1,1,1]: return (1,o)
-    return (0,v)
-
-def best(cards):
-    b=None
-    n=len(cards)
-    for i in range(n-4):
-        for j in range(i+1,n-3):
-            for k in range(j+1,n-2):
-                for l in range(k+1,n-1):
-                    for m in range(l+1,n):
-                        r=rank5([cards[i],cards[j],cards[k],cards[l],cards[m]])
-                        if b is None or r>b: b=r
-    return b
 
 players=[]
 clients=[]

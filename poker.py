@@ -1,0 +1,149 @@
+import random
+from collections import Counter
+
+R={r:i for i,r in enumerate("23456789TJQKA",start=2)}
+
+def make_deck():
+    suits=["♠","♥","♦","♣"]
+    ranks=["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
+    d=[r+s for s in suits for r in ranks]
+    random.shuffle(d)
+    return d
+
+def cv(c):
+    r=c[:-1]
+    if r=="10": r="T"
+    return R[r]
+
+def straight(v):
+    u=sorted(set(v))
+
+    if len(u)<5: return False,None
+
+    if set([14,5,4,3,2]).issubset(v): return True,5
+
+    for i in range(len(u)-4):
+        if u[i:i+5]==list(range(u[i],u[i]+5)): return True,u[i+4]
+    return False,None
+
+def rank5(cards):
+    v=sorted([cv(c) for c in cards],reverse=True)
+    s=[c[-1] for c in cards]
+    f=len(set(s))==1
+    st,hi=straight(v)
+    c=Counter(v)
+    g=sorted(c.items(),key=lambda x:(x[1],x[0]),reverse=True)
+    freq=[x[1] for x in g]
+    o=[x[0] for x in g for _ in range(x[1])]
+
+    if st and f:
+        if hi==14: return (9,[14])
+        return (8,[hi])
+    
+    if freq==[4,1]: return (7,o)
+    if freq==[3,2]: return (6,o)
+    if f: return (5,v)
+    if st: return (4,[hi])
+    if freq==[3,1,1]: return (3,o)
+    if freq==[2,2,1]: return (2,o)
+    if freq==[2,1,1,1]: return (1,o)
+
+    return (0,v)
+
+def best(cards):
+    b=None
+    n=len(cards)
+    for i in range(n-4):
+        for j in range(i+1,n-3):
+            for k in range(j+1,n-2):
+                for l in range(k+1,n-1):
+                    for m in range(l+1,n):
+                        r=rank5([cards[i],cards[j],cards[k],cards[l],cards[m]])
+                        if b is None or r>b: b=r
+    return b
+
+class Table:
+    def __init__(self, small_blind=5, big_blind=10, initial_chips=500):
+        self.small_blind = small_blind
+        self.big_blind = big_blind
+        self.initial_chips = initial_chips
+        self.players = []
+        self.button = -1
+        self.turn = None
+        self.phase = "waiting"
+        self.community_cards = []
+        self.deck = []
+        self.highest_bet = 0
+        self.min_raise = big_blind
+
+    def add_player(self, id_,name):
+        self.players.append({
+            "id": id_,
+            "name": name,
+            "chips": self.initial_chips,
+            "hand": [],
+            "current_bet": 0,
+            "total_bet": 0,
+            "in_round": False,
+            "allin": False,
+            "talked": False
+        })
+
+    def _next_index(self, start, cond):
+        n = len(self.players)
+        for k in range(1, n + 1):
+            i = (start + k) % n
+            if cond(self.players[i]):
+                return i
+        return None
+
+    def _can_act(self, p):
+        return p["in_round"] and not p["allin"]
+
+    def _put_chips(self, p, amount):
+        pay = min(amount, p["chips"])
+        p["chips"] -= pay
+        p["current_bet"] += pay
+        p["total_bet"] += pay
+        if p["chips"] == 0:
+            p["allin"] = True
+        return pay
+
+    def start_hand(self):
+        with_chips = [p for p in self.players if p["chips"] > 0]
+        if len(with_chips) < 2:
+            self.phase = "waiting"
+            return False
+
+        self.deck = make_deck()
+        self.community_cards = []
+
+        for p in self.players:
+            p["hand"] = []
+            p["current_bet"] = 0
+            p["total_bet"] = 0
+            p["allin"] = False
+            p["talked"] = False
+            p["in_round"] = p["chips"] > 0
+            if p["in_round"]:
+                p["hand"] = [self.deck.pop(), self.deck.pop()]
+
+        in_hand = lambda p: p["in_round"]
+
+        self.button = self._next_index(self.button, in_hand)
+
+        if len(with_chips) == 2:
+            sb = self.button
+        else:
+            sb = self._next_index(self.button, in_hand)
+        bb = self._next_index(sb, in_hand)
+
+        self._put_chips(self.players[sb], self.small_blind)
+        self._put_chips(self.players[bb], self.big_blind)
+
+        self.highest_bet = self.big_blind
+        self.min_raise = self.big_blind
+        self.phase = "preflop"
+
+        self.turn = self._next_index(bb, self._can_act)
+        return True
